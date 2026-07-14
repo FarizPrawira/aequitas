@@ -1,0 +1,60 @@
+{
+  "name": "aequitas",
+  "version": "0.1.0",
+  "description": "Fairly distribute weighted items into capacity-bounded bins. Framework-agnostic, zero-dependency load balancing with capacity bands and preferences.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.cjs",
+    "dist/**/*.d.ts",
+    "dist/**/*.d.cts"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "verify": "npm run typecheck && npm test && npm run build",
+    "preversion": "npm run verify",
+    "postversion": "git push --follow-tags",
+    "prepublishOnly": "npm run verify"
+  },
+  "keywords": [
+    "load-balancing",
+    "bin-packing",
+    "assignment",
+    "fair",
+    "typescript"
+  ],
+  "author": "Fariz Prawira <farizprawira94@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FarizPrawira/aequitas.git"
+  },
+  "bugs": {
+    "url": "https://github.com/FarizPrawira/aequitas/issues"
+  },
+  "homepage": "https://github.com/FarizPrawira/aequitas#readme",
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^4.1.6",
+    "tsup": "^8.5.1",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.6"
+  }
+}
