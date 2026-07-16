@@ -29,6 +29,11 @@ export function affinityOf(item: Item, binId: string): number {
   return item.affinities?.[binId] ?? 0;
 }
 
+/** How many distinct bins an item spreads across (`1` when unset). */
+export function splitOf(item: Item): number {
+  return item.split ?? 1;
+}
+
 /** Index items by id for O(1) lookup. */
 export function indexItems(items: readonly Item[]): Map<string, Item> {
   const map = new Map<string, Item>();
@@ -52,6 +57,11 @@ export function validateInputs(items: readonly Item[], bins: readonly Bin[]): vo
     if (!Number.isFinite(item.weight)) {
       throw new TypeError(
         `aequitas: item ${JSON.stringify(item.id)} has a non-finite weight (${item.weight})`,
+      );
+    }
+    if (item.split !== undefined && (!Number.isInteger(item.split) || item.split < 1)) {
+      throw new TypeError(
+        `aequitas: item ${JSON.stringify(item.id)} has an invalid split (${item.split}); expected a positive integer`,
       );
     }
   }
@@ -78,26 +88,33 @@ export function validateInputs(items: readonly Item[], bins: readonly Bin[]): vo
 
 /**
  * Accumulate per-bin load and total satisfied affinity in a single pass, reusing
- * a pre-built item index and bin-id set. Only real bins (present in `binIds`)
- * count; assignments to unknown bins or `null` are ignored — keeping load and
- * affinity accounting consistent everywhere they are derived.
+ * a pre-built item index and bin-id set. An item's weight is divided equally over
+ * the real bins it occupies (present in `binIds`); unknown bins are ignored, so a
+ * partially-placed split item still spreads its full weight across the bins it did
+ * land on. Affinity is credited once per occupied bin. This keeps load and affinity
+ * accounting consistent everywhere they are derived.
  */
 export function accumulate(
   itemMap: ReadonlyMap<string, Item>,
   bins: readonly Bin[],
   binIds: ReadonlySet<string>,
-  assign: ReadonlyMap<string, string | null>,
+  assign: ReadonlyMap<string, readonly string[]>,
 ): { loads: Map<string, number>; affinitySum: number } {
   const loads = new Map<string, number>();
   for (const bin of bins) loads.set(bin.id, 0);
 
   let affinitySum = 0;
-  for (const [itemId, binId] of assign) {
-    if (binId === null || !binIds.has(binId)) continue;
+  for (const [itemId, placedBins] of assign) {
     const item = itemMap.get(itemId);
     if (item === undefined) continue;
-    loads.set(binId, (loads.get(binId) ?? 0) + item.weight);
-    affinitySum += affinityOf(item, binId);
+    // Distinct real bins only — a caller-supplied duplicate must not double-count.
+    const real = [...new Set(placedBins)].filter((b) => binIds.has(b));
+    if (real.length === 0) continue;
+    const share = item.weight / real.length;
+    for (const binId of real) {
+      loads.set(binId, (loads.get(binId) ?? 0) + share);
+      affinitySum += affinityOf(item, binId);
+    }
   }
   return { loads, affinitySum };
 }

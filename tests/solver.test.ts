@@ -24,9 +24,11 @@ function assertLocalOptimum(
   for (const a of result.assignments) {
     if (a.locked) continue;
     for (const bin of bins) {
-      if (bin.id === a.binId) continue;
+      if (a.binIds.includes(bin.id)) continue;
+      // These scenarios are all single-bin items, so a relocation is just
+      // swapping the one bin for another.
       const moved: Assignment[] = result.assignments.map((x) =>
-        x.itemId === a.itemId ? { ...x, binId: bin.id } : x,
+        x.itemId === a.itemId ? { ...x, binIds: [bin.id] } : x,
       );
       const c = cost(items, bins, moved);
       expect(c).toBeGreaterThanOrEqual(base - 1e-9);
@@ -36,35 +38,35 @@ function assertLocalOptimum(
 
 describe('rebalance', () => {
   describe('when current points at a bin that no longer exists', () => {
-    it('pulls the item back into a real bin, even with affinity to the missing one', () => {
+    it('ignores the missing bin and places the item into a real one', () => {
       const items: Item[] = [{ id: 'x', weight: 1, affinities: { ghost: 100 } }];
       const bins: Bin[] = [
         { id: 'a', min: 1, max: 10 },
         { id: 'b', max: 10 },
       ];
       // "ghost" was a real bin when this assignment was made; it's gone now.
-      const current: Assignment[] = [{ itemId: 'x', binId: 'ghost' }];
+      const current: Assignment[] = [{ itemId: 'x', binIds: ['ghost'] }];
 
       const result = rebalance(items, bins, current);
       const x = result.assignments.find((a) => a.itemId === 'x')!;
 
-      expect(x.binId).toBe('a'); // a satisfies its own min
+      expect(x.binIds).toEqual(['a']); // a satisfies its own min
       expect(result.violations).toBe(0);
       expect(result.loads['a']).toBe(1);
       expect(result.unassigned).toEqual([]);
     });
 
-    it('does not chase a phantom negative affinity into an over-capacity move', () => {
-      // A large repellent (negative) affinity to the removed bin. Buggy bookkeeping
-      // would credit "escaping" ghost as a big affinity win and cram x into `a`
-      // despite the over-capacity violation. Correctly ignoring the out-of-set
-      // affinity, there is no beneficial move, so x stays put.
+    it('does not chase a phantom affinity into an over-capacity move', () => {
+      // The removed bin is dropped, leaving x unassigned. Placing it in `a` would
+      // overflow the only bin, so the solver correctly leaves it out rather than
+      // taking an over-capacity move.
       const items: Item[] = [{ id: 'x', weight: 10, affinities: { ghost: -300 } }];
       const bins: Bin[] = [{ id: 'a', max: 5 }];
-      const current: Assignment[] = [{ itemId: 'x', binId: 'ghost' }];
+      const current: Assignment[] = [{ itemId: 'x', binIds: ['ghost'] }];
 
       const result = rebalance(items, bins, current);
-      expect(result.assignments[0]!.binId).toBe('ghost');
+      expect(result.assignments[0]!.binIds).toEqual([]);
+      expect(result.unassigned).toEqual(['x']);
       expect(result.violations).toBe(0);
       expect(result.cost).toBe(0);
       expect(cost(items, bins, result.assignments)).toBe(result.cost);
@@ -109,6 +111,14 @@ describe('input validation', () => {
       expect(() => suggest([{ id: 'a', weight: Infinity }], [{ id: 'x' }])).toThrow(
         TypeError,
       );
+    });
+  });
+
+  describe('when an item split is not a positive integer', () => {
+    it('throws a TypeError', () => {
+      expect(() => suggest([{ id: 'a', weight: 5, split: 0 }], [{ id: 'x' }])).toThrow(TypeError);
+      expect(() => suggest([{ id: 'a', weight: 5, split: 1.5 }], [{ id: 'x' }])).toThrow(TypeError);
+      expect(() => suggest([{ id: 'a', weight: 5, split: -2 }], [{ id: 'x' }])).toThrow(TypeError);
     });
   });
 

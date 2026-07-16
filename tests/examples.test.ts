@@ -55,17 +55,17 @@ describe('balancing class sections across lecturers (credit hours)', () => {
       const seed = suggest(sections, lecturers);
 
       // Lock "algorithms" onto a lecturer it was NOT assigned to, to prove locks are honored.
-      const seededBin = seed.assignments.find((a) => a.itemId === 'algorithms')!.binId;
+      const seededBin = seed.assignments.find((a) => a.itemId === 'algorithms')!.binIds[0];
       const pinnedBin = seededBin === 'cinta' ? 'ana' : 'cinta';
 
       const current = seed.assignments.map((a) =>
-        a.itemId === 'algorithms' ? { ...a, binId: pinnedBin, locked: true } : a,
+        a.itemId === 'algorithms' ? { ...a, binIds: [pinnedBin], locked: true } : a,
       );
 
       const result = rebalance(sections, lecturers, current);
 
       const algorithms = result.assignments.find((a) => a.itemId === 'algorithms')!;
-      expect(algorithms.binId).toBe(pinnedBin);
+      expect(algorithms.binIds).toEqual([pinnedBin]);
       expect(algorithms.locked).toBe(true);
       expect(result.violations).toBe(0);
       for (const bin of lecturers) {
@@ -108,7 +108,7 @@ describe('balancing tasks across workers (hours, no preferences)', () => {
 
   describe('when starting from a lopsided assignment', () => {
     it('rebalances the load back toward even', () => {
-      const lopsided = tasks.map((t) => ({ itemId: t.id, binId: 'alice' as string | null }));
+      const lopsided = tasks.map((t) => ({ itemId: t.id, binIds: ['alice'] }));
       const result = rebalance(tasks, workers, lopsided);
 
       const loads = Object.values(result.loads);
