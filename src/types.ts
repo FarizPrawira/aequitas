@@ -4,10 +4,18 @@
  * `weight` is the amount of capacity the item consumes (hours, credits, points, …).
  * `affinities` maps a bin id to a preference score: higher = stronger pull,
  * an absent or `0` score is neutral, negative discourages the pairing.
+ *
+ * `split` is how many *distinct* bins the item should spread across (default `1`).
+ * Its weight is divided equally over the bins it actually occupies, so a
+ * `weight: 6, split: 2` item contributes `3` to each of two bins. When fewer than
+ * `split` bins are available or have room, the item occupies as many as it can and
+ * the weight divides over those — nothing is lost. Affinity is credited once per
+ * bin the item lands on.
  */
 export interface Item {
   id: string;
   weight: number;
+  split?: number;
   affinities?: Record<string, number>;
 }
 
@@ -26,12 +34,14 @@ export interface Bin {
 /**
  * The placement of one item.
  *
- * `binId` is `null` when the item is left unassigned. A `locked` assignment is
- * never moved by {@link rebalance}.
+ * `binIds` lists the distinct bins the item occupies — empty when unassigned, and
+ * between `1` and the item's `split` otherwise. A `locked` assignment is never
+ * moved by {@link rebalance}. When passed back in as `current`, any id that is no
+ * longer a real bin is ignored.
  */
 export interface Assignment {
   itemId: string;
-  binId: string | null;
+  binIds: string[];
   locked?: boolean;
 }
 
@@ -67,7 +77,8 @@ export interface Result {
   cost: number;
   /** Total capacity-band overflow/underflow across all bins. `0` means in-band. */
   violations: number;
-  /** Ids of items left unassigned. */
+  /** Ids of items left unassigned (no bin at all). A partially-placed split item —
+   *  on fewer bins than its `split` — is not listed here. */
   unassigned: string[];
   /** Sum of satisfied affinity scores across all placed items. */
   affinityScore: number;

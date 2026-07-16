@@ -18,17 +18,30 @@ import {
   indexItems,
   loadStats,
   resolveWeights,
+  splitOf,
   validateInputs,
 } from './internal.js';
 
-/** The least-loaded bin overall, ties broken by bin id. */
-function leastLoaded(
+// An item may span several bins (`split`), so a placement is a list of distinct
+// bins rather than a single one. Its weight divides equally over the bins it
+// occupies, so as the list grows or shrinks every share is re-weighted.
+type Placement = Map<string, string[]>;
+
+/** Even share an item puts on each of the `n` bins it occupies. */
+function shareOf(item: Item, n: number): number {
+  return n === 0 ? 0 : item.weight / n;
+}
+
+/** Least-loaded bin the item may still take (not already occupied), ties by id. */
+function leastLoadedFree(
   bins: readonly Bin[],
   loads: ReadonlyMap<string, number>,
+  occupied: readonly string[],
 ): string | null {
   let bestId: string | null = null;
   let bestLoad = Infinity;
   for (const bin of bins) {
+    if (occupied.includes(bin.id)) continue;
     const load = loads.get(bin.id) ?? 0;
     if (bestId === null || load < bestLoad || (load === bestLoad && bin.id < bestId)) {
       bestId = bin.id;
@@ -39,70 +52,195 @@ function leastLoaded(
 }
 
 /**
- * Greedy seed: heaviest items first, each dropped into the bin that maximizes
- * affinity among those with room, breaking ties by least load then bin id. Bins
- * are scanned once per item — room test and best-bin selection share the pass.
+ * Best bin for one more share of `item`: the highest-affinity bin (among those
+ * the item doesn't already hold) with room for the share, ties broken by least
+ * load then bin id. When nothing has room and `onUnfit` is `"forceLeastLoaded"`,
+ * fall back to the least-loaded free bin; otherwise return `null`.
  */
+function pickBin(
+  item: Item,
+  bins: readonly Bin[],
+  loads: ReadonlyMap<string, number>,
+  occupied: readonly string[],
+  share: number,
+  onUnfit: OnUnfit,
+): string | null {
+  let target: string | null = null;
+  let bestAff = -Infinity;
+  let bestLoad = Infinity;
+
+  for (const bin of bins) {
+    if (occupied.includes(bin.id)) continue; // one bin per item at most once
+    const load = loads.get(bin.id) ?? 0;
+    if (load + share > (bin.max ?? Infinity)) continue; // no room
+    const aff = affinityOf(item, bin.id);
+    const better =
+      target === null ||
+      aff > bestAff ||
+      (aff === bestAff && (load < bestLoad || (load === bestLoad && bin.id < target)));
+    if (better) {
+      target = bin.id;
+      bestAff = aff;
+      bestLoad = load;
+    }
+  }
+
+  if (target === null && onUnfit === 'forceLeastLoaded') {
+    target = leastLoadedFree(bins, loads, occupied);
+  }
+  return target;
+}
+
+/**
+ * Claim up to `split` distinct bins for one item, spending capacity in `loads` as
+ * it goes. Each claim takes the best bin with room (by affinity, then least load,
+ * then id); when none has room the item forces onto the least-loaded free bin, or
+ * is left short under `onUnfit: "leave"`. The running loads use `weight / split`
+ * as a per-share estimate — the hill-climb re-derives exact loads before optimizing.
+ */
+function claimBins(
+  item: Item,
+  bins: readonly Bin[],
+  loads: Map<string, number>,
+  onUnfit: OnUnfit,
+): string[] {
+  const split = splitOf(item);
+  const share = shareOf(item, split);
+  const chosen: string[] = [];
+
+  for (let s = 0; s < split; s++) {
+    const target = pickBin(item, bins, loads, chosen, share, onUnfit);
+    if (target === null) break; // no distinct bin left (or leaving it short)
+    chosen.push(target);
+    loads.set(target, (loads.get(target) ?? 0) + share);
+  }
+
+  return chosen;
+}
+
+/** Greedy seed: heaviest items first, each claiming up to `split` distinct bins. */
 function greedySeed(
   items: readonly Item[],
   bins: readonly Bin[],
   onUnfit: OnUnfit,
-): Map<string, string | null> {
-  const assign = new Map<string, string | null>();
+): Placement {
+  const assign: Placement = new Map();
   const loads = new Map<string, number>();
   for (const bin of bins) loads.set(bin.id, 0);
 
-  const ordered = [...items].sort(
-    (a, b) => b.weight - a.weight || cmpId(a.id, b.id),
-  );
-
-  for (const item of ordered) {
-    let target: string | null = null;
-    let bestAff = -Infinity;
-    let bestLoad = Infinity;
-
-    for (const bin of bins) {
-      const load = loads.get(bin.id) ?? 0;
-      if (load + item.weight > (bin.max ?? Infinity)) continue; // no room
-      const aff = affinityOf(item, bin.id);
-      const better =
-        target === null ||
-        aff > bestAff ||
-        (aff === bestAff &&
-          (load < bestLoad || (load === bestLoad && bin.id < target)));
-      if (better) {
-        target = bin.id;
-        bestAff = aff;
-        bestLoad = load;
-      }
-    }
-
-    if (target === null && bins.length > 0 && onUnfit === 'forceLeastLoaded') {
-      target = leastLoaded(bins, loads);
-    }
-
-    assign.set(item.id, target);
-    if (target !== null) loads.set(target, (loads.get(target) ?? 0) + item.weight);
-  }
-
+  const ordered = [...items].sort((a, b) => b.weight - a.weight || cmpId(a.id, b.id));
+  for (const item of ordered) assign.set(item.id, claimBins(item, bins, loads, onUnfit));
   return assign;
 }
 
 /**
+ * Apply a set of `[binId, delta]` load changes plus an affinity delta, score the
+ * result with the public cost function, then restore `loads` exactly. Only the
+ * touched bins are mutated; `loadStats` still scans every bin for band + spread.
+ */
+function trialCost(
+  bins: readonly Bin[],
+  loads: Map<string, number>,
+  changes: readonly (readonly [string, number])[],
+  affinitySum: number,
+  weights: ResolvedWeights,
+): number {
+  const saved: [string, number][] = [];
+  for (const [binId, delta] of changes) {
+    const old = loads.get(binId) ?? 0;
+    saved.push([binId, old]);
+    loads.set(binId, old + delta);
+  }
+  const { band, spread } = loadStats(bins, loads);
+  const c = combineCost(band, spread, affinitySum, weights);
+  for (const [binId, old] of saved) loads.set(binId, old);
+  return c;
+}
+
+// A single candidate reassignment for `itemId`. Exactly one of `from`/`to` may be
+// null: relocate (both set) moves a share between bins, add (`from` null) grows a
+// split item toward its target, drop (`to` null) gives a bin back. `changes`/
+// `affinityDelta` describe the effect on loads and satisfied affinity.
+interface Move {
+  itemId: string;
+  from: string | null;
+  to: string | null;
+  changes: (readonly [string, number])[];
+  affinityDelta: number;
+}
+
+/** Every reassignment worth trying for one item: relocate an existing share to a
+ *  free bin, add a new share (re-splitting the weight) while under `split`, or
+ *  drop a bin (re-splitting over the rest) while it keeps at least one. */
+function movesFor(
+  item: Item,
+  occupied: readonly string[],
+  bins: readonly Bin[],
+): Move[] {
+  const moves: Move[] = [];
+  const k = occupied.length;
+  const share = shareOf(item, k);
+  const canGrow = k < splitOf(item);
+
+  for (const bin of bins) {
+    const to = bin.id;
+    if (occupied.includes(to)) continue; // must land on a bin it doesn't already hold
+    const toAff = affinityOf(item, to);
+
+    // Relocate: move one existing share off `from` onto `to`. Count is unchanged,
+    // so the per-share weight stays the same.
+    for (const from of occupied) {
+      moves.push({
+        itemId: item.id,
+        from,
+        to,
+        changes: [
+          [from, -share],
+          [to, share],
+        ],
+        affinityDelta: toAff - affinityOf(item, from),
+      });
+    }
+
+    // Add: take on one more bin. The weight re-splits, so every bin already held
+    // sheds a little and the newcomer takes the new, smaller share.
+    if (canGrow) {
+      const next = shareOf(item, k + 1);
+      const changes: [string, number][] = occupied.map((b) => [b, next - share]);
+      changes.push([to, next]);
+      moves.push({ itemId: item.id, from: null, to, changes, affinityDelta: toAff });
+    }
+  }
+
+  // Drop: give a bin back (only while at least one remains). The weight re-splits
+  // over the survivors, each taking a bit more — worth it when concentrating load
+  // fits a band better than spreading it.
+  if (k >= 2) {
+    const fewer = shareOf(item, k - 1);
+    for (const from of occupied) {
+      const changes: [string, number][] = occupied
+        .filter((b) => b !== from)
+        .map((b) => [b, fewer - share]);
+      changes.push([from, -share]);
+      moves.push({ itemId: item.id, from, to: null, changes, affinityDelta: -affinityOf(item, from) });
+    }
+  }
+
+  return moves;
+}
+
+/**
  * Hill-climb in place: repeatedly apply the single reassignment that most lowers
- * cost, until no move improves or `maxIterations` is hit. Locked items never
- * move; items are only ever moved into a real bin, never voluntarily unassigned.
- * An item currently on a bin outside `binIds` (e.g. a bin that was removed
- * before a rebalance) is treated exactly like an unassigned one — matching how
- * {@link accumulate} accounts for it — so its load and affinity bookkeeping stay
- * consistent and it can be pulled back into a real bin.
+ * cost, until nothing improves or `maxIterations` is hit. Locked items never move.
+ * Each step relocates one of an item's shares to a bin it doesn't hold, adds a
+ * share toward its `split`, or drops a bin back — always into or out of a real
+ * bin, and never below one bin (a placed item is never voluntarily emptied).
  */
 function hillClimb(
   items: readonly Item[],
   bins: readonly Bin[],
-  binIds: ReadonlySet<string>,
   itemMap: ReadonlyMap<string, Item>,
-  assign: Map<string, string | null>,
+  assign: Placement,
   locked: ReadonlySet<string>,
   weights: ResolvedWeights,
   maxIterations: number,
@@ -111,64 +249,48 @@ function hillClimb(
 
   const sortedItems = [...items].sort((a, b) => cmpId(a.id, b.id));
   const sortedBins = [...bins].sort((a, b) => cmpId(a.id, b.id));
+  const binIds = new Set(bins.map((b) => b.id));
   const { loads, affinitySum: initialAffinity } = accumulate(itemMap, bins, binIds, assign);
   let affinitySum = initialAffinity;
-  const initialStats = loadStats(bins, loads);
-  let currentCost = combineCost(initialStats.band, initialStats.spread, affinitySum, weights);
+  const initial = loadStats(bins, loads);
+  let currentCost = combineCost(initial.band, initial.spread, affinitySum, weights);
 
   for (let iter = 0; iter < maxIterations; iter++) {
-    let bestDelta = 0;
+    let best: Move | null = null;
     let bestCost = currentCost;
-    let bestItem: string | null = null;
-    let bestTarget: string | null = null;
 
     for (const item of sortedItems) {
       if (locked.has(item.id)) continue;
-      const rawFrom = assign.get(item.id) ?? null;
-      // A bin outside binIds is treated as "unassigned" for accounting.
-      const from = rawFrom !== null && binIds.has(rawFrom) ? rawFrom : null;
-      const w = item.weight;
-      const fromLoad = from !== null ? loads.get(from) ?? 0 : 0;
-      const fromAff = from !== null ? affinityOf(item, from) : 0;
-
-      for (const bin of sortedBins) {
-        if (bin.id === from) continue;
-        const toLoad = loads.get(bin.id) ?? 0;
-
-        // Apply the move to the shared loads map, measure, then restore.
-        if (from !== null) loads.set(from, fromLoad - w);
-        loads.set(bin.id, toLoad + w);
-        const newAff = affinitySum - fromAff + affinityOf(item, bin.id);
-        const { band, spread } = loadStats(bins, loads);
-        const newCost = combineCost(band, spread, newAff, weights);
-        if (from !== null) loads.set(from, fromLoad);
-        loads.set(bin.id, toLoad);
-
-        const delta = newCost - currentCost;
-        if (delta < bestDelta - EPSILON) {
-          bestDelta = delta;
-          bestCost = newCost;
-          bestItem = item.id;
-          bestTarget = bin.id;
+      const occupied = assign.get(item.id) ?? [];
+      for (const move of movesFor(item, occupied, sortedBins)) {
+        const c = trialCost(bins, loads, move.changes, affinitySum + move.affinityDelta, weights);
+        if (c < bestCost - EPSILON) {
+          best = move;
+          bestCost = c;
         }
       }
     }
 
-    if (bestItem === null || bestTarget === null) break;
+    if (best === null) break;
 
-    const item = itemMap.get(bestItem);
-    if (item === undefined) break;
-    const rawFrom = assign.get(bestItem) ?? null;
-    const from = rawFrom !== null && binIds.has(rawFrom) ? rawFrom : null;
-    const w = item.weight;
-    if (from !== null) loads.set(from, (loads.get(from) ?? 0) - w);
-    loads.set(bestTarget, (loads.get(bestTarget) ?? 0) + w);
-    affinitySum =
-      affinitySum -
-      (from !== null ? affinityOf(item, from) : 0) +
-      affinityOf(item, bestTarget);
-    assign.set(bestItem, bestTarget);
-    currentCost = bestCost; // exact: bestCost was measured for this very move
+    // Commit the winning move: fold its load changes in, update the affinity
+    // running total, and rewrite the item's placement list.
+    for (const [binId, delta] of best.changes) {
+      loads.set(binId, (loads.get(binId) ?? 0) + delta);
+    }
+    affinitySum += best.affinityDelta;
+    const occupied = assign.get(best.itemId) ?? [];
+    if (best.to === null) {
+      assign.set(best.itemId, occupied.filter((b) => b !== best!.from)); // drop
+    } else if (best.from === null) {
+      assign.set(best.itemId, [...occupied, best.to]); // add
+    } else {
+      assign.set(
+        best.itemId,
+        occupied.map((b) => (b === best!.from ? best!.to! : b)), // relocate
+      );
+    }
+    currentCost = bestCost;
   }
 }
 
@@ -177,7 +299,7 @@ function buildResult(
   bins: readonly Bin[],
   binIds: ReadonlySet<string>,
   itemMap: ReadonlyMap<string, Item>,
-  assign: ReadonlyMap<string, string | null>,
+  assign: Placement,
   locked: ReadonlySet<string>,
   weights: ResolvedWeights,
 ): Result {
@@ -190,12 +312,12 @@ function buildResult(
   const unassigned: string[] = [];
 
   for (const item of items) {
-    const binId = assign.get(item.id) ?? null;
+    const binIdsOut = (assign.get(item.id) ?? []).filter((b) => binIds.has(b));
     const assignment: Assignment = locked.has(item.id)
-      ? { itemId: item.id, binId, locked: true }
-      : { itemId: item.id, binId };
+      ? { itemId: item.id, binIds: binIdsOut, locked: true }
+      : { itemId: item.id, binIds: binIdsOut };
     assignments.push(assignment);
-    if (binId === null) unassigned.push(item.id);
+    if (binIdsOut.length === 0) unassigned.push(item.id);
   }
 
   return {
@@ -206,6 +328,21 @@ function buildResult(
     unassigned,
     affinityScore: affinitySum,
   };
+}
+
+/** Distinct, real bins from a supplied placement: dedup, drop unknown bins, and
+ *  cap at `limit` so a placement never exceeds the item's split. */
+function cleanBins(binIds: readonly string[], real: ReadonlySet<string>, limit: number): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const id of binIds) {
+    if (real.has(id) && !seen.has(id)) {
+      seen.add(id);
+      out.push(id);
+      if (out.length === limit) break;
+    }
+  }
+  return out;
 }
 
 /**
@@ -226,7 +363,7 @@ export function suggest(
   const noLocks: ReadonlySet<string> = new Set();
 
   const assign = greedySeed(items, bins, onUnfit);
-  hillClimb(items, bins, binIds, itemMap, assign, noLocks, weights, maxIterations);
+  hillClimb(items, bins, itemMap, assign, noLocks, weights, maxIterations);
   return buildResult(items, bins, binIds, itemMap, assign, noLocks, weights);
 }
 
@@ -234,7 +371,8 @@ export function suggest(
  * Improve an existing assignment. Every locked assignment is held fixed and only
  * unlocked items are reshuffled; the current placement is the starting point.
  * Items present in `items` but absent from `current` start unassigned and may be
- * placed if doing so lowers cost.
+ * placed if doing so lowers cost. Bin ids in `current` that no longer exist are
+ * ignored.
  */
 export function rebalance(
   items: readonly Item[],
@@ -251,19 +389,29 @@ export function rebalance(
   const currentMap = new Map<string, Assignment>();
   for (const a of current) currentMap.set(a.itemId, a);
 
-  const assign = new Map<string, string | null>();
+  const assign: Placement = new Map();
   const locked = new Set<string>();
   for (const item of items) {
     const cur = currentMap.get(item.id);
-    if (cur === undefined) {
-      assign.set(item.id, null);
-    } else {
-      assign.set(item.id, cur.binId);
-      if (cur.locked === true) locked.add(item.id);
-    }
+    // Each placement is capped at the item's split; if a lock lists more bins than
+    // a since-reduced split allows, the cap wins over the lock for the extras.
+    assign.set(item.id, cur ? cleanBins(cur.binIds, binIds, splitOf(item)) : []);
+    if (cur?.locked === true) locked.add(item.id);
   }
 
-  hillClimb(items, bins, binIds, itemMap, assign, locked, weights, maxIterations);
+  // Greedily seed any unlocked item that has no placement yet (heaviest first)
+  // onto the capacity the current placements already use, without forcing
+  // overflow. This covers both items missing from `current` and ones whose bins
+  // have all gone stale — a fresh split item lands on several bins at once instead
+  // of being stranded, since a single share move can't cross the transient
+  // over-capacity dip in between.
+  const seedLoads = accumulate(itemMap, bins, binIds, assign).loads;
+  const toSeed = items
+    .filter((it) => !locked.has(it.id) && (assign.get(it.id) ?? []).length === 0)
+    .sort((a, b) => b.weight - a.weight || cmpId(a.id, b.id));
+  for (const item of toSeed) assign.set(item.id, claimBins(item, bins, seedLoads, 'leave'));
+
+  hillClimb(items, bins, itemMap, assign, locked, weights, maxIterations);
   return buildResult(items, bins, binIds, itemMap, assign, locked, weights);
 }
 
@@ -281,8 +429,8 @@ export function cost(
   const resolved = resolveWeights(weights);
   const itemMap = indexItems(items);
   const binIds = new Set(bins.map((b) => b.id));
-  const assign = new Map<string, string | null>();
-  for (const a of assignments) assign.set(a.itemId, a.binId);
+  const assign: Placement = new Map();
+  for (const a of assignments) assign.set(a.itemId, [...a.binIds]);
   const { loads, affinitySum } = accumulate(itemMap, bins, binIds, assign);
   const { band, spread } = loadStats(bins, loads);
   return combineCost(band, spread, affinitySum, resolved);

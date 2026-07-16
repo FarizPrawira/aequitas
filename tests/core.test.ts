@@ -49,8 +49,8 @@ describe('cost', () => {
   describe('when the assignment is balanced, in-band, and preference-free', () => {
     it('is zero', () => {
       const assignments: Assignment[] = [
-        { itemId: 'a', binId: 'x' },
-        { itemId: 'b', binId: 'y' },
+        { itemId: 'a', binIds: ['x'] },
+        { itemId: 'b', binIds: ['y'] },
       ];
       expect(cost(items, bins, assignments)).toBe(0);
     });
@@ -59,8 +59,8 @@ describe('cost', () => {
   describe('when a bin is out of band', () => {
     it('charges the overflow and underflow at the violation weight', () => {
       const assignments: Assignment[] = [
-        { itemId: 'a', binId: 'x' },
-        { itemId: 'b', binId: 'x' },
+        { itemId: 'a', binIds: ['x'] },
+        { itemId: 'b', binIds: ['x'] },
       ];
       // x load 10 (over max 6 by 4), y load 0 (under min 4 by 4) => band 8.
       // spread 10. cost = 100*8 + 1*10 - 0 = 810.
@@ -79,10 +79,10 @@ describe('cost', () => {
     it('lowers the cost by the affinity weight times the score', () => {
       const solo: Bin[] = [{ id: 'x' }];
       const withAff = cost([{ id: 'a', weight: 5, affinities: { x: 3 } }], solo, [
-        { itemId: 'a', binId: 'x' },
+        { itemId: 'a', binIds: ['x'] },
       ]);
       const withoutAff = cost([{ id: 'a', weight: 5 }], solo, [
-        { itemId: 'a', binId: 'x' },
+        { itemId: 'a', binIds: ['x'] },
       ]);
       // Default affinity weight is 2, so 3 satisfied points lower cost by 6.
       expect(withoutAff - withAff).toBe(6);
@@ -108,7 +108,7 @@ describe('suggest', () => {
       const result = suggest(items, []);
       expect(result.loads).toEqual({});
       expect(result.unassigned).toEqual(['a']);
-      expect(result.assignments[0]!.binId).toBeNull();
+      expect(result.assignments[0]!.binIds).toEqual([]);
       expect(result.violations).toBe(0);
     });
   });
@@ -158,7 +158,7 @@ describe('suggest', () => {
       it('forces the item into the least-loaded bin', () => {
         const result = suggest(items, bins);
         expect(result.unassigned).toEqual([]);
-        expect(result.assignments[0]!.binId).toBe('x');
+        expect(result.assignments[0]!.binIds).toEqual(['x']);
       });
     });
   });
@@ -179,7 +179,7 @@ describe('suggest', () => {
       const reversed = suggest([...items].reverse(), [...bins].reverse());
 
       const toMap = (r: typeof forward) =>
-        Object.fromEntries(r.assignments.map((a) => [a.itemId, a.binId]));
+        Object.fromEntries(r.assignments.map((a) => [a.itemId, a.binIds.join(',')]));
       expect(toMap(forward)).toEqual(toMap(reversed));
     });
   });
@@ -201,8 +201,8 @@ describe('purity', () => {
 
       suggest(items, bins);
       rebalance(items, bins, [
-        { itemId: 'a', binId: 'x', locked: true },
-        { itemId: 'b', binId: 'x' },
+        { itemId: 'a', binIds: ['x'], locked: true },
+        { itemId: 'b', binIds: ['x'] },
       ]);
 
       expect(items).toEqual(itemsSnapshot);

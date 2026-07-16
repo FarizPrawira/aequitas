@@ -64,12 +64,13 @@ Zero runtime dependencies. DevDeps (tsup, vitest, typescript) are not installed 
 
 ## Concepts
 
-An **item** is a weighted thing to place. A **bin** is a destination with a capacity band. An **assignment** puts one item in one bin (or `null` for unassigned).
+An **item** is a weighted thing to place. A **bin** is a destination with a capacity band. An **assignment** lists the bins an item lands in (empty = unassigned). By default an item goes to one bin, but `split` lets it span several — its weight divides equally over them.
 
 ```ts
 interface Item {
   id: string;
   weight: number;                       // capacity consumed: hours, credits, points…
+  split?: number;                       // distinct bins to spread across (default 1)
   affinities?: Record<string, number>;  // binId -> preference, higher = stronger, absent/0 = neutral
 }
 
@@ -81,10 +82,12 @@ interface Bin {
 
 interface Assignment {
   itemId: string;
-  binId: string | null;   // null = unassigned
-  locked?: boolean;       // rebalance never moves a locked assignment
+  binIds: string[];   // the bins the item occupies; [] = unassigned
+  locked?: boolean;   // rebalance never moves a locked assignment
 }
 ```
+
+**Splitting.** An item with `split: n` spreads across up to `n` distinct bins, its weight divided equally over the bins it actually occupies — a `weight: 6, split: 2` item adds `3` to each of two bins. If fewer than `n` bins are available or have room, it takes as many as it can and the weight divides over those, so nothing is lost (a `split: 2` item that only fits one bin carries the full `6` there). Affinity is credited once per bin the item lands on.
 
 The solver minimizes a single cost:
 
@@ -96,7 +99,7 @@ cost = violation · bandViolations
 
 - **bandViolations** — summed per bin: how far its load falls below `min` plus how far it rises above `max`.
 - **spread** — the load range across bins (evenness).
-- **totalAffinitySatisfied** — sum of each placed item's affinity for the bin it landed in.
+- **totalAffinitySatisfied** — sum of each placed item's affinity, counted once per bin it lands in.
 
 Default weights are `violation: 100`, `spread: 1`, `affinity: 2` — capacity first, then evenness, with preferences as a gentle tiebreaker. Override any of them via `options.weights`.
 
@@ -133,12 +136,24 @@ plan.violations;   // → 0
 
 // Pin "algorithms" to Ana no matter what, then let aequitas reshuffle everyone else.
 const pinned = plan.assignments.map((a) =>
-  a.itemId === "algorithms" ? { ...a, binId: "ana", locked: true } : a,
+  a.itemId === "algorithms" ? { ...a, binIds: ["ana"], locked: true } : a,
 );
 
 const revised = rebalance(sections, lecturers, pinned);
-revised.assignments.find((a) => a.itemId === "algorithms"); // → { itemId: "algorithms", binId: "ana", locked: true }
+revised.assignments.find((a) => a.itemId === "algorithms"); // → { itemId: "algorithms", binIds: ["ana"], locked: true }
 // "algorithms" stays pinned to ana; every other section is reshuffled around it.
+```
+
+Need a class **co-taught** by two lecturers? Give it a `split`, and its credit hours divide equally between whoever aequitas lands it on:
+
+```ts
+const sections = [
+  { id: "seminar", weight: 8, split: 2 },  // 4 credit hours on each of two lecturers
+  // …other sections
+];
+
+const plan = suggest(sections, lecturers);
+plan.assignments.find((a) => a.itemId === "seminar"); // → { itemId: "seminar", binIds: ["ana", "budi"] }
 ```
 
 ### 2. Tasks / workers, no preferences
@@ -165,7 +180,7 @@ plan.unassigned; // → []
 
 // Start from a lopsided state (everything on alice) and even it out,
 // touching only unlocked items.
-const lopsided = tasks.map((t) => ({ itemId: t.id, binId: "alice" }));
+const lopsided = tasks.map((t) => ({ itemId: t.id, binIds: ["alice"] }));
 const evened = rebalance(tasks, workers, lopsided);
 evened.loads;    // → balanced across alice / bob / carol
 ```
@@ -218,7 +233,7 @@ interface Result {
   loads: Record<string, number>;    // total weight per bin (every bin present)
   cost: number;                     // final cost of this assignment
   violations: number;               // total band overflow + underflow; 0 = all in-band
-  unassigned: string[];             // ids of items left with binId null
+  unassigned: string[];             // ids of items left with no bin (binIds empty)
   affinityScore: number;            // sum of satisfied affinity scores
 }
 ```
@@ -227,8 +242,8 @@ interface Result {
 
 One built-in strategy, applied automatically — there is nothing to configure beyond weights.
 
-1. **Greedy seed.** Sort items by weight descending (ties by id). For each item, pick the bin that maximizes affinity among bins with room (`load + weight <= max`), breaking ties by least current load, then by bin id. If none have room, drop it into the least-loaded bin overall — or leave it unassigned when `onUnfit: "leave"`.
-2. **Hill-climb.** Repeatedly apply the single reassignment that most lowers `cost`, until no move improves (or `maxIterations` is reached). `rebalance` only considers moves of unlocked items and treats locked loads as fixed.
+1. **Greedy seed.** Sort items by weight descending (ties by id). Each item claims up to `split` distinct bins, one at a time; each claim goes to the bin that maximizes affinity among bins it doesn't already hold with room (`load + share <= max`), breaking ties by least current load, then by bin id. If none have room, it forces onto the least-loaded free bin — or is left short when `onUnfit: "leave"`.
+2. **Hill-climb.** Repeatedly apply the single reassignment that most lowers `cost`, until no move improves (or `maxIterations` is reached). A move relocates one of an item's shares to a bin it doesn't yet hold, adds a share toward its `split`, or drops a bin back (each re-splitting the weight over the bins that remain). `rebalance` also greedily seeds any item missing from `current` before climbing, only moves unlocked items, and treats locked loads as fixed.
 
 Every tie — in seeding and in climbing — is resolved by id, so runs are fully reproducible. There is no `Math.random` anywhere.
 
@@ -240,7 +255,7 @@ Every tie — in seeding and in climbing — is resolved by id, so runs are full
 - A bin with **only `min`** or **only `max`** treats the missing bound as unconstrained.
 - **Ties** are always broken by id, so identical inputs always yield identical output.
 - Inputs are **never mutated**; every call returns fresh objects.
-- `rebalance` tolerates a `current` assignment that points at a bin no longer in `bins` (e.g. a removed worker): the item is treated as unassigned and pulled back into a real bin when that lowers cost.
+- `rebalance` tolerates a `current` assignment that points at a bin no longer in `bins` (e.g. a removed worker): the stale id is ignored, and the item is placed into a real bin when that lowers cost.
 
 ## Validation
 
@@ -248,6 +263,7 @@ Malformed input that would make the result silently wrong is rejected with a `Ty
 
 - **Duplicate item ids** or **duplicate bin ids** — internal state is keyed by id, so duplicates would collapse and undercount load.
 - A **non-finite item `weight`** (`NaN`, `Infinity`).
+- An **invalid item `split`** — anything but a positive integer.
 - A **`NaN` bound** on a bin, or an **inverted band** where `min > max`.
 
 Explicit `min: -Infinity` / `max: Infinity` are accepted as "unconstrained".
