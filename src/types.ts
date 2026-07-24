@@ -35,25 +35,48 @@ export interface Bin {
  * The placement of one item.
  *
  * `binIds` lists the distinct bins the item occupies — empty when unassigned, and
- * between `1` and the item's `split` otherwise. A `locked` assignment is never
- * moved by {@link rebalance}. When passed back in as `current`, any id that is no
- * longer a real bin is ignored.
+ * between `1` and the item's `split` otherwise. When passed back in as `current`,
+ * any id that is no longer a real bin is ignored.
+ *
+ * Locking comes in two grains, both honoured by {@link rebalance}:
+ *  - `locked: true` pins the whole placement — the item is never touched.
+ *  - `lockedBinIds` pins only those bins: they always stay on the item, but the
+ *    solver may still add, drop, or relocate the *other* bins (up to `split`).
+ *    Ids not currently in `binIds`, or no longer real, are ignored.
+ * `locked: true` wins over `lockedBinIds` if both are given.
  */
 export interface Assignment {
   itemId: string;
   binIds: string[];
   locked?: boolean;
+  lockedBinIds?: string[];
 }
 
 /**
- * Relative importance of the three cost terms. Defaults: `violation` 100,
- * `spread` 1, `affinity` 2 — capacity comes first, then evenness, then
- * preferences as a tiebreaker.
+ * A pair of bins that should not both appear on the same item.
+ *
+ * `hard: true` forbids the pairing outright — the solver never creates it and
+ * breaks any that a `current` placement already has (locked bins excepted).
+ * Otherwise the pairing is discouraged by the `exclusion` cost weight: allowed
+ * only when every alternative is worse (e.g. it would leave an item unplaced).
+ */
+export interface Exclusion {
+  bins: readonly [string, string];
+  hard?: boolean;
+}
+
+/**
+ * Relative importance of the cost terms. Defaults: `violation` 100, `spread` 1,
+ * `affinity` 2, `exclusion` 50 — capacity comes first, then a soft exclusion sits
+ * just under it (strongly avoided but yielding to an unplaceable item), then
+ * evenness, then preferences as a tiebreaker. `exclusion` only affects soft
+ * exclusions; hard ones are enforced structurally regardless of this weight.
  */
 export interface Weights {
   violation?: number;
   spread?: number;
   affinity?: number;
+  exclusion?: number;
 }
 
 /** What to do with an item that fits in no bin during the greedy seed. */
@@ -68,6 +91,12 @@ export interface Options {
    * least-loaded bin anyway, `"leave"` leaves it unassigned.
    */
   onUnfit?: OnUnfit;
+  /**
+   * Pairs of bins that should not share an item. A `hard` pair is never placed
+   * together; a soft pair is discouraged by the `exclusion` weight. Applies to
+   * every item. Pairs naming an unknown bin, or a bin with itself, are ignored.
+   */
+  exclusions?: readonly Exclusion[];
 }
 
 export interface Result {

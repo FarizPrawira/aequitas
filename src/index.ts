@@ -4,6 +4,7 @@ export type {
   Item,
   Bin,
   Assignment,
+  Exclusion,
   Weights,
   Options,
   OnUnfit,

@@ -1,9 +1,10 @@
-import type { Bin, Item, ResolvedWeights, Weights } from './types.js';
+import type { Bin, Exclusion, Item, ResolvedWeights, Weights } from './types.js';
 
 export const DEFAULT_WEIGHTS: ResolvedWeights = {
   violation: 100,
   spread: 1,
   affinity: 2,
+  exclusion: 50,
 };
 
 export const DEFAULT_MAX_ITERATIONS = 10_000;
@@ -16,7 +17,104 @@ export function resolveWeights(weights?: Weights): ResolvedWeights {
     violation: weights?.violation ?? DEFAULT_WEIGHTS.violation,
     spread: weights?.spread ?? DEFAULT_WEIGHTS.spread,
     affinity: weights?.affinity ?? DEFAULT_WEIGHTS.affinity,
+    exclusion: weights?.exclusion ?? DEFAULT_WEIGHTS.exclusion,
   };
+}
+
+/**
+ * Symmetric bin-conflict lookups split by strictness. `hard` pairs may never
+ * share an item; `soft` pairs are penalised by the `exclusion` weight. Built once
+ * per solve. Pairs naming an unknown bin, or a bin with itself, are dropped.
+ */
+export interface Conflicts {
+  hard: Map<string, Set<string>>;
+  soft: Map<string, Set<string>>;
+}
+
+export function buildConflicts(
+  exclusions: readonly Exclusion[] | undefined,
+  binIds: ReadonlySet<string>,
+): Conflicts {
+  const hard = new Map<string, Set<string>>();
+  const soft = new Map<string, Set<string>>();
+  const link = (map: Map<string, Set<string>>, a: string, b: string) => {
+    let set = map.get(a);
+    if (set === undefined) {
+      set = new Set();
+      map.set(a, set);
+    }
+    set.add(b);
+  };
+  const real = (a: string, b: string) => a !== b && binIds.has(a) && binIds.has(b);
+
+  // Hard first, so a pair listed as both hard and soft is only ever hard — its
+  // co-occurrence is prevented structurally and never also charged the soft weight.
+  for (const ex of exclusions ?? []) {
+    if (!ex.hard) continue;
+    const [a, b] = ex.bins;
+    if (!real(a, b)) continue;
+    link(hard, a, b);
+    link(hard, b, a);
+  }
+  for (const ex of exclusions ?? []) {
+    if (ex.hard) continue;
+    const [a, b] = ex.bins;
+    if (!real(a, b) || hard.get(a)?.has(b)) continue; // hard wins
+    link(soft, a, b);
+    link(soft, b, a);
+  }
+  return { hard, soft };
+}
+
+/** Whether `binId` hard-conflicts with any bin in `others`. */
+export function hasHardConflict(
+  binId: string,
+  others: readonly string[],
+  conflicts: Conflicts,
+): boolean {
+  const set = conflicts.hard.get(binId);
+  if (set === undefined) return false;
+  for (const o of others) if (set.has(o)) return true;
+  return false;
+}
+
+/** How many bins in `others` soft-conflict with `binId`. */
+export function countSoftConflicts(
+  binId: string,
+  others: readonly string[],
+  conflicts: Conflicts,
+): number {
+  const set = conflicts.soft.get(binId);
+  if (set === undefined) return 0;
+  let n = 0;
+  for (const o of others) if (set.has(o)) n++;
+  return n;
+}
+
+/**
+ * Soft-conflicting pairs within one item's occupied bins. Duplicates are counted
+ * once (mirroring how `accumulate` dedupes bins), so a malformed placement passed
+ * to the public `cost` can't inflate the pair count.
+ */
+export function softPairsIn(occupied: readonly string[], conflicts: Conflicts): number {
+  const bins = occupied.length > 1 ? [...new Set(occupied)] : occupied;
+  let n = 0;
+  for (let i = 0; i < bins.length; i++) {
+    const set = conflicts.soft.get(bins[i]!);
+    if (set === undefined) continue;
+    for (let j = i + 1; j < bins.length; j++) if (set.has(bins[j]!)) n++;
+  }
+  return n;
+}
+
+/** Soft-conflicting pairs summed over every item's placement. */
+export function totalSoftExclusions(
+  assign: ReadonlyMap<string, readonly string[]>,
+  conflicts: Conflicts,
+): number {
+  let n = 0;
+  for (const bins of assign.values()) n += softPairsIn(bins, conflicts);
+  return n;
 }
 
 /** Stable string comparison for deterministic id tie-breaking. */
@@ -146,13 +244,20 @@ export function loadStats(
 
 /**
  * The scalar cost being minimized:
- *   violation * bandViolations + spread * (maxLoad − minLoad) − affinity * affinitySatisfied
+ *   violation * bandViolations + spread * (maxLoad − minLoad)
+ *     − affinity * affinitySatisfied + exclusion * softExclusionPairs
  */
 export function combineCost(
   band: number,
   spread: number,
   affinitySum: number,
+  softExclusions: number,
   weights: ResolvedWeights,
 ): number {
-  return weights.violation * band + weights.spread * spread - weights.affinity * affinitySum;
+  return (
+    weights.violation * band +
+    weights.spread * spread -
+    weights.affinity * affinitySum +
+    weights.exclusion * softExclusions
+  );
 }
