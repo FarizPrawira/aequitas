@@ -34,7 +34,8 @@ plan.violations;   // → 0                               — every bin inside i
 - One built-in algorithm — greedy seed + hill-climb, no strategy to pick
 - Capacity **bands**: per-bin `min` and/or `max`, either optional
 - Optional per-item **affinities** (preferences) toward specific bins
-- `rebalance` respects **locked** assignments and only reshuffles the rest
+- **Exclusions**: bin pairs that must not share an item, hard (never) or soft (penalised)
+- `rebalance` respects **locks** at two grains: a whole assignment, or just some of its bins
 - Fully **deterministic** — ties always broken by id, no `Math.random`
 - **Pure** functions — inputs are never mutated
 - Framework-agnostic, domain-neutral; works in Node and the browser (no Node built-ins)
@@ -82,10 +83,20 @@ interface Bin {
 
 interface Assignment {
   itemId: string;
-  binIds: string[];   // the bins the item occupies; [] = unassigned
-  locked?: boolean;   // rebalance never moves a locked assignment
+  binIds: string[];         // the bins the item occupies; [] = unassigned
+  locked?: boolean;         // rebalance never moves a locked assignment
+  lockedBinIds?: string[];  // pin just these bins; the rest may still change
+}
+
+interface Exclusion {
+  bins: readonly [string, string];  // two bins that should not share an item
+  hard?: boolean;                   // true = never together; false/absent = penalised (soft)
 }
 ```
+
+**Locks.** `locked: true` pins a whole placement; `rebalance` never touches it. `lockedBinIds` pins only the listed bins — they always stay on the item while the solver is free to add, drop, or relocate the *other* bins (up to `split`). Ids not currently on the item, or no longer real, are ignored; `locked: true` wins if both are set.
+
+**Exclusions.** Pass `options.exclusions` to keep bin pairs off the same item. A `hard` pair is never placed together — the seed and every move avoid it, and `rebalance` breaks a pairing an existing placement already has (bins held by a `lockedBinIds`/`locked` lock excepted). A soft pair is merely discouraged, costing the `exclusion` weight per pairing, so it survives only when every alternative is worse (e.g. it would leave a bin under its `min`). Exclusions apply to every item; pairs naming an unknown bin or a bin with itself are ignored.
 
 **Splitting.** An item with `split: n` spreads across up to `n` distinct bins, its weight divided equally over the bins it actually occupies — a `weight: 6, split: 2` item adds `3` to each of two bins. If fewer than `n` bins are available or have room, it takes as many as it can and the weight divides over those, so nothing is lost (a `split: 2` item that only fits one bin carries the full `6` there). Affinity is credited once per bin the item lands on.
 
@@ -95,13 +106,15 @@ The solver minimizes a single cost:
 cost = violation · bandViolations
      + spread    · (maxLoad − minLoad)
      − affinity  · totalAffinitySatisfied
+     + exclusion · softExclusionPairs
 ```
 
 - **bandViolations** — summed per bin: how far its load falls below `min` plus how far it rises above `max`.
 - **spread** — the load range across bins (evenness).
 - **totalAffinitySatisfied** — sum of each placed item's affinity, counted once per bin it lands in.
+- **softExclusionPairs** — count of soft-excluded bin pairs that ended up sharing an item. (Hard exclusions never appear in the cost; they are enforced structurally.)
 
-Default weights are `violation: 100`, `spread: 1`, `affinity: 2` — capacity first, then evenness, with preferences as a gentle tiebreaker. Override any of them via `options.weights`.
+Default weights are `violation: 100`, `spread: 1`, `affinity: 2`, `exclusion: 50` — capacity first, then a soft exclusion just below it, then evenness, with preferences as a gentle tiebreaker. Override any of them via `options.weights`.
 
 ## Examples
 
@@ -199,11 +212,11 @@ Builds an assignment from scratch. Locks are ignored — every item is placed by
 
 ### `rebalance(items, bins, current, options?) → Result`
 
-Improves an existing assignment. Every `locked` assignment in `current` is held fixed; only unlocked items are reshuffled, starting from where they already are. Items that appear in `items` but not in `current` start unassigned and are placed only if doing so lowers cost.
+Improves an existing assignment. A `locked: true` assignment in `current` is held fixed; a `lockedBinIds` assignment keeps those bins pinned while its other bins may be reshuffled. Items that appear in `items` but not in `current` start unassigned and are placed only if doing so lowers cost. Hard exclusions already present in `current` are broken up (pinned bins excepted).
 
-### `cost(items, bins, assignments, weights?) → number`
+### `cost(items, bins, assignments, options?) → number`
 
-Scores an arbitrary assignment with the exact cost function the solver minimizes. Exposed for inspection and testing.
+Scores an arbitrary assignment with the exact cost function the solver minimizes. `options` takes the same `weights` and `exclusions` as `suggest`/`rebalance`; pass the exclusions used to solve to include the soft-exclusion term. Exposed for inspection and testing.
 
 ### `rankToAffinity(rank) → number`
 
@@ -217,13 +230,17 @@ interface Options {
     violation?: number;  // default 100
     spread?: number;     // default 1
     affinity?: number;   // default 2
+    exclusion?: number;  // default 50 (soft exclusions only)
   };
   maxIterations?: number;               // hill-climb safety cap, default 10_000
   onUnfit?: "leave" | "forceLeastLoaded"; // default "forceLeastLoaded"
+  exclusions?: Exclusion[];             // bin pairs that must not share an item
 }
 ```
 
 `onUnfit` decides what happens to an item that fits in no bin during the greedy seed: `"forceLeastLoaded"` drops it into the least-loaded bin anyway (accepting a band violation), `"leave"` leaves it unassigned.
+
+`exclusions` lists bin pairs that should not share an item; see [Exclusions](#concepts) above for hard vs soft.
 
 ### Result
 
@@ -242,8 +259,8 @@ interface Result {
 
 One built-in strategy, applied automatically — there is nothing to configure beyond weights.
 
-1. **Greedy seed.** Sort items by weight descending (ties by id). Each item claims up to `split` distinct bins, one at a time; each claim goes to the bin that maximizes affinity among bins it doesn't already hold with room (`load + share <= max`), breaking ties by least current load, then by bin id. If none have room, it forces onto the least-loaded free bin — or is left short when `onUnfit: "leave"`.
-2. **Hill-climb.** Repeatedly apply the single reassignment that most lowers `cost`, until no move improves (or `maxIterations` is reached). A move relocates one of an item's shares to a bin it doesn't yet hold, adds a share toward its `split`, or drops a bin back (each re-splitting the weight over the bins that remain). `rebalance` also greedily seeds any item missing from `current` before climbing, only moves unlocked items, and treats locked loads as fixed.
+1. **Greedy seed.** Sort items by weight descending (ties by id). Each item claims up to `split` distinct bins, one at a time; each claim goes to the bin that maximizes affinity among bins it doesn't already hold with room (`load + share <= max`), breaking ties by least current load, then by bin id. A bin that hard-conflicts with one the item already holds is skipped. If none have room, it forces onto the least-loaded free bin (still respecting hard exclusions) — or is left short when `onUnfit: "leave"`.
+2. **Hill-climb.** Repeatedly apply the single reassignment that most lowers `cost`, until no move improves (or `maxIterations` is reached). A move relocates one of an item's shares to a bin it doesn't yet hold, adds a share toward its `split`, or drops a bin back (each re-splitting the weight over the bins that remain). Moves that would create a hard-exclusion pair, or move/drop a pinned bin, are never generated. `rebalance` also greedily seeds any item missing from `current` before climbing, holds `locked` items still, keeps each item's `lockedBinIds` fixed, and breaks any hard-exclusion pairing already present (pinned bins excepted).
 
 Every tie — in seeding and in climbing — is resolved by id, so runs are fully reproducible. There is no `Math.random` anywhere.
 
