@@ -1,6 +1,6 @@
 {
   "name": "aequitas",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Fairly distribute weighted items into capacity-bounded bins. Framework-agnostic, zero-dependency load balancing with capacity bands and preferences.",
   "type": "module",
   "main": "./dist/index.cjs",
