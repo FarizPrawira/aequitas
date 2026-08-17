@@ -14,7 +14,7 @@ Fairly distribute weighted items into capacity-bounded bins.
 
 Framework-agnostic and domain-neutral: the "items" and "bins" can be anything with a weight and a capacity, whether tasks onto workers, shifts onto staff, class sections onto lecturers, or shards onto nodes. aequitas seeds a greedy assignment, then hill-climbs it toward an even, in-band, preference-respecting layout. Deterministic, pure, and zero-dependency.
 
-Full documentation, including how the solver works and every option: **[aequitas.pages.dev](https://aequitas.pages.dev)**
+Full documentation, including how the solver works and every option: **[aequitasjs.pages.dev](https://aequitasjs.pages.dev)**
 
 ```ts
 import { suggest, rebalance, rankToAffinity } from "aequitas";
