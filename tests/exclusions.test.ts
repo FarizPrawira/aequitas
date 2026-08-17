@@ -111,7 +111,7 @@ describe('exclusions', () => {
     });
 
     it('is respected even when forcing an unfit item onto a bin', () => {
-      // No bin has room, so the item is forced onto bins anyway — but never onto the
+      // No bin has room, so the item is forced onto bins anyway, but never onto the
       // hard-excluded pair.
       const items: Item[] = [{ id: 'a', weight: 6, split: 2 }];
       const bins: Bin[] = [

@@ -56,7 +56,7 @@ describe('splittable items', () => {
 
   describe('when concentrating a split item onto one bin fits a band better', () => {
     it('drops a bin rather than leave a min-violation', () => {
-      // Split 2 seeds 3/3, but b1 needs at least 6 — putting the whole 6 there is
+      // Split 2 seeds 3/3, but b1 needs at least 6, so putting the whole 6 there is
       // in-band and beats the spread.
       const items: Item[] = [{ id: 'a', weight: 6, split: 2 }];
       const bins: Bin[] = [

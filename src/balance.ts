@@ -31,7 +31,7 @@ import {
 // occupies, so as the list grows or shrinks every share is re-weighted.
 type Placement = Map<string, string[]>;
 
-/** No bins pinned — shared by every fully-flexible item to avoid re-allocating. */
+/** No bins pinned. Shared by every fully-flexible item to avoid re-allocating. */
 const NO_LOCKS: ReadonlySet<string> = new Set();
 
 /** Even share an item puts on each of the `n` bins it occupies. */
@@ -110,7 +110,7 @@ function pickBin(
  * then id) that doesn't hard-conflict with the bins already claimed; when none has
  * room the item forces onto the least-loaded free bin, or is left short under
  * `onUnfit: "leave"`. The running loads use `weight / split` as a per-share
- * estimate — the hill-climb re-derives exact loads before optimizing.
+ * estimate, and the hill-climb re-derives exact loads before optimizing.
  */
 function claimBins(
   item: Item,
@@ -228,7 +228,7 @@ function movesFor(
 
   // Per-movable-`from` facts are independent of the target `to`, so compute them
   // once here rather than rebuilding `others` (and its affinity/soft totals) inside
-  // the bin loop below. Pinned bins are excluded — they can never be moved or dropped.
+  // the bin loop below. Pinned bins are excluded, since they can never be moved.
   const movable = occupied
     .filter((from) => !locked.has(from))
     .map((from) => {
@@ -280,7 +280,7 @@ function movesFor(
   }
 
   // Drop: give a bin back (only while at least one remains). The weight re-splits
-  // over the survivors, each taking a bit more — worth it when concentrating load
+  // over the survivors, each taking a bit more, worth it when concentrating load
   // fits a band better than spreading it.
   if (k >= 2) {
     const fewer = shareOf(item, k - 1);
@@ -307,7 +307,7 @@ function movesFor(
  * cost, until nothing improves or `maxIterations` is hit. Fully-locked items never
  * move; a partially-locked item's pinned bins stay put while its other bins are
  * free to change. Each step relocates one share, adds a share toward `split`, or
- * drops a bin back — always into or out of a real bin, never below one bin, and
+ * drops a bin back, always into or out of a real bin, never below one bin, and
  * never creating a hard-exclusion pair.
  */
 function hillClimb(
@@ -442,9 +442,14 @@ function cleanBins(binIds: readonly string[], real: ReadonlySet<string>, limit: 
 }
 
 /**
- * Build an assignment from scratch. Locks are ignored — every item is placed
- * greedily and then hill-climbed toward the lowest cost. Exclusions are honoured:
- * hard pairs are never placed together, soft pairs cost the `exclusion` weight.
+ * Build an assignment from scratch: every item goes through the greedy seed, then
+ * the layout is hill-climbed toward the lowest cost. Locks are ignored, since this
+ * takes no assignments to read them from.
+ *
+ * Under the default `onUnfit: 'forceLeastLoaded'` every item ends up on a bin,
+ * taking a band violation when nothing has room; under `'leave'` an item that fits
+ * nowhere is left in `unassigned`. Exclusions are honoured: hard pairs are never
+ * placed together, soft pairs cost the `exclusion` weight.
  */
 export function suggest(
   items: readonly Item[],
@@ -466,12 +471,20 @@ export function suggest(
 }
 
 /**
- * Improve an existing assignment. A `locked: true` assignment is held fixed; a
- * `lockedBinIds` assignment keeps those bins pinned while its other bins may be
- * reshuffled. Items present in `items` but absent from `current` start unassigned
- * and may be placed if doing so lowers cost. Bin ids in `current` that no longer
- * exist are ignored. Hard exclusions already present in `current` are broken up
- * (locked bins excepted); soft ones are traded off by the `exclusion` weight.
+ * Improve an existing assignment. A `locked: true` assignment is never reassigned
+ * (its bin list is still normalized, see {@link Assignment}); a `lockedBinIds`
+ * assignment keeps those bins pinned while its other bins may be reshuffled.
+ *
+ * Items present in `items` but absent from `current` are greedily seeded onto bins
+ * that still have room, then hill-climbed. That seeding is *not* gated on lowering
+ * cost, and because dropping a bin requires the item to hold two or more, a newly
+ * seeded single-bin item can never return to unassigned. Placing it may therefore
+ * raise the total cost.
+ *
+ * Bin ids in `current` that no longer exist are ignored. Hard exclusions already
+ * present in `current` are broken up (locked bins excepted); soft ones are traded
+ * off by the `exclusion` weight. `options.onUnfit` is ignored: seeding here never
+ * pushes a bin past its `max`.
  */
 export function rebalance(
   items: readonly Item[],
@@ -526,7 +539,7 @@ export function rebalance(
   // Greedily seed any unlocked item that has no placement yet (heaviest first)
   // onto the capacity the current placements already use, without forcing
   // overflow. This covers both items missing from `current` and ones whose bins
-  // have all gone stale — a fresh split item lands on several bins at once instead
+  // have all gone stale. A fresh split item lands on several bins at once instead
   // of being stranded, since a single share move can't cross the transient
   // over-capacity dip in between.
   const seedLoads = accumulate(itemMap, bins, binIds, assign).loads;

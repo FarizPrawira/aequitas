@@ -3,13 +3,17 @@
  *
  * `weight` is the amount of capacity the item consumes (hours, credits, points, …).
  * `affinities` maps a bin id to a preference score: higher = stronger pull,
- * an absent or `0` score is neutral, negative discourages the pairing.
+ * an absent or `0` score is neutral, negative discourages the pairing. Any finite
+ * number is accepted and the scale is yours; see {@link rankToAffinity} for turning
+ * a preference rank into one. Note that affinity values are *not* validated, so a
+ * `NaN` here propagates into `cost` rather than throwing. No affinity, however
+ * large or negative, can forbid a pairing outright: omit the bin instead.
  *
  * `split` is how many *distinct* bins the item should spread across (default `1`).
  * Its weight is divided equally over the bins it actually occupies, so a
  * `weight: 6, split: 2` item contributes `3` to each of two bins. When fewer than
  * `split` bins are available or have room, the item occupies as many as it can and
- * the weight divides over those — nothing is lost. Affinity is credited once per
+ * the weight divides over those, so nothing is lost. Affinity is credited once per
  * bin the item lands on.
  */
 export interface Item {
@@ -34,12 +38,16 @@ export interface Bin {
 /**
  * The placement of one item.
  *
- * `binIds` lists the distinct bins the item occupies — empty when unassigned, and
+ * `binIds` lists the distinct bins the item occupies: empty when unassigned, and
  * between `1` and the item's `split` otherwise. When passed back in as `current`,
  * any id that is no longer a real bin is ignored.
  *
- * Locking comes in two grains, both honoured by {@link rebalance}:
- *  - `locked: true` pins the whole placement — the item is never touched.
+ * Locking comes in two grains, both honoured by {@link rebalance} and both ignored
+ * by {@link suggest}, which takes no assignments:
+ *  - `locked: true` stops the solver reassigning the item. The bin list is still
+ *    normalized first: duplicates collapse, ids that are no longer real are
+ *    dropped, and the list is trimmed to `split`. A lock prevents reassignment,
+ *    not normalization.
  *  - `lockedBinIds` pins only those bins: they always stay on the item, but the
  *    solver may still add, drop, or relocate the *other* bins (up to `split`).
  *    Ids not currently in `binIds`, or no longer real, are ignored.
@@ -55,7 +63,7 @@ export interface Assignment {
 /**
  * A pair of bins that should not both appear on the same item.
  *
- * `hard: true` forbids the pairing outright — the solver never creates it and
+ * `hard: true` forbids the pairing outright: the solver never creates it and
  * breaks any that a `current` placement already has (locked bins excepted).
  * Otherwise the pairing is discouraged by the `exclusion` cost weight: allowed
  * only when every alternative is worse (e.g. it would leave an item unplaced).
@@ -67,7 +75,7 @@ export interface Exclusion {
 
 /**
  * Relative importance of the cost terms. Defaults: `violation` 100, `spread` 1,
- * `affinity` 2, `exclusion` 50 — capacity comes first, then a soft exclusion sits
+ * `affinity` 2, `exclusion` 50. Capacity comes first, then a soft exclusion sits
  * just under it (strongly avoided but yielding to an unplaceable item), then
  * evenness, then preferences as a tiebreaker. `exclusion` only affects soft
  * exclusions; hard ones are enforced structurally regardless of this weight.
@@ -79,7 +87,12 @@ export interface Weights {
   exclusion?: number;
 }
 
-/** What to do with an item that fits in no bin during the greedy seed. */
+/**
+ * What to do with an item that fits in no bin during a greedy seed.
+ *
+ * Read by {@link suggest} only. {@link rebalance} seeds conservatively and always
+ * behaves as `'leave'`, so passing this to it has no effect.
+ */
 export type OnUnfit = 'leave' | 'forceLeastLoaded';
 
 export interface Options {
@@ -89,6 +102,9 @@ export interface Options {
   /**
    * When an item fits nowhere: `"forceLeastLoaded"` (default) drops it into the
    * least-loaded bin anyway, `"leave"` leaves it unassigned.
+   *
+   * Honoured by {@link suggest} only. {@link rebalance} ignores it and never pushes
+   * a bin past its `max` to place an item.
    */
   onUnfit?: OnUnfit;
   /**
@@ -106,8 +122,8 @@ export interface Result {
   cost: number;
   /** Total capacity-band overflow/underflow across all bins. `0` means in-band. */
   violations: number;
-  /** Ids of items left unassigned (no bin at all). A partially-placed split item —
-   *  on fewer bins than its `split` — is not listed here. */
+  /** Ids of items left unassigned (no bin at all). A partially-placed split item,
+   *  on fewer bins than its `split`, is not listed here. */
   unassigned: string[];
   /** Sum of satisfied affinity scores across all placed items. */
   affinityScore: number;
