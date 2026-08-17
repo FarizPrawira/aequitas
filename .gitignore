@@ -4,6 +4,9 @@ dist
 coverage
 *.tsbuildinfo
 
+# Docs site: its own git repo (FarizPrawira/aequitas-docs), deployed separately.
+/docs
+
 # Editors / IDEs
 .idea
 .vscode
