@@ -47,7 +47,7 @@ export function buildConflicts(
   };
   const real = (a: string, b: string) => a !== b && binIds.has(a) && binIds.has(b);
 
-  // Hard first, so a pair listed as both hard and soft is only ever hard — its
+  // Hard first, so a pair listed as both hard and soft is only ever hard: its
   // co-occurrence is prevented structurally and never also charged the soft weight.
   for (const ex of exclusions ?? []) {
     if (!ex.hard) continue;
@@ -205,7 +205,7 @@ export function accumulate(
   for (const [itemId, placedBins] of assign) {
     const item = itemMap.get(itemId);
     if (item === undefined) continue;
-    // Distinct real bins only — a caller-supplied duplicate must not double-count.
+    // Distinct real bins only, so a caller-supplied duplicate cannot double-count.
     const real = [...new Set(placedBins)].filter((b) => binIds.has(b));
     if (real.length === 0) continue;
     const share = item.weight / real.length;
